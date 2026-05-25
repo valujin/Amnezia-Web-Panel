@@ -158,6 +158,15 @@
 
         <form id="addServerForm" onsubmit="return addServer(event)">
             <div class="form-group">
+                <label class="form-label">{{ _('server_type') or 'Server type' }}</label>
+                <select class="form-input" id="serverType" onchange="onServerTypeChange()">
+                    <option value="docker">{{ _('server_type_docker') or 'Docker (default Amnezia stack)' }}</option>
+                    <option value="native">{{ _('server_type_native') or 'Native AmneziaWG 2.0 (bare-metal installer)' }}</option>
+                </select>
+                <div class="form-hint">{{ _('server_type_hint') or 'Native uses valujin/amneziawg-installer — no Docker needed.' }}</div>
+            </div>
+
+            <div class="form-group">
                 <label class="form-label">{{ _('name') }}</label>
                 <input class="form-input" type="text" id="serverName" placeholder="My VPN Server">
             </div>
@@ -201,6 +210,86 @@
                 </div>
             </div>
 
+            <!-- ===== Native (bare-metal) install options ===== -->
+            <div id="nativeInstallBlock" class="hidden" style="margin-top: var(--space-md); padding: var(--space-md); border: 1px solid var(--border-color); border-radius: 8px;">
+                <h3 style="margin: 0 0 var(--space-sm); font-size: 1rem;">{{ _('install_options_title') or 'Install options (AmneziaWG 2.0)' }}</h3>
+                <div class="form-hint" style="margin-bottom: var(--space-md);">
+                    {{ _('install_options_hint') or 'Passed straight to install_amneziawg.sh. Defaults match the recommended profile.' }}
+                </div>
+
+                <div class="form-group">
+                    <label class="form-label inline-flex items-center gap-sm">
+                        <input type="checkbox" id="autoInstall" checked>
+                        {{ _('auto_install_label') or 'Run installer right after connecting' }}
+                    </label>
+                </div>
+
+                <div class="form-row">
+                    <div class="form-group">
+                        <label class="form-label">{{ _('install_port') or 'Listen port' }}</label>
+                        <input class="form-input" type="text" id="installPort" value="9443">
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label">{{ _('install_preset') or 'Preset' }}</label>
+                        <select class="form-input" id="installPreset">
+                            <option value="custom-conf" selected>custom-conf</option>
+                            <option value="default">default</option>
+                            <option value="mobile">mobile</option>
+                        </select>
+                    </div>
+                </div>
+
+                <div class="form-group">
+                    <label class="form-label">{{ _('install_conf_url') or 'Custom conf URL (only for preset=custom-conf)' }}</label>
+                    <input class="form-input" type="text" id="installConf"
+                        value="https://raw.githubusercontent.com/valujin/amneziawg-installer/main/conf/amneziawg-2.0-1779689104577.conf">
+                </div>
+
+                <div class="form-group">
+                    <label class="form-label">{{ _('install_routing') or 'Routing mode' }}</label>
+                    <select class="form-input" id="installRouting" onchange="onRoutingChange()">
+                        <option value="route-all" selected>route-all</option>
+                        <option value="route-amnezia">route-amnezia</option>
+                        <option value="route-custom">route-custom</option>
+                    </select>
+                </div>
+
+                <div class="form-group hidden" id="customRoutesRow">
+                    <label class="form-label">{{ _('install_custom_routes') or 'Custom routes (CIDR list, comma-separated)' }}</label>
+                    <input class="form-input" type="text" id="installCustomRoutes" placeholder="10.0.0.0/8, 192.168.1.0/24">
+                </div>
+
+                <div class="form-row">
+                    <div class="form-group">
+                        <label class="form-label">{{ _('install_subnet') or 'VPN subnet (optional)' }}</label>
+                        <input class="form-input" type="text" id="installSubnet" placeholder="10.8.0.0/24">
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label">{{ _('install_endpoint') or 'External endpoint (optional)' }}</label>
+                        <input class="form-input" type="text" id="installEndpoint" placeholder="vpn.example.com">
+                    </div>
+                </div>
+
+                <div class="form-group">
+                    <label class="form-label inline-flex items-center gap-sm">
+                        <input type="checkbox" id="installAllowIpv6" checked>
+                        {{ _('install_allow_ipv6') or 'Allow IPv6 (--allow-ipv6)' }}
+                    </label>
+                </div>
+                <div class="form-group">
+                    <label class="form-label inline-flex items-center gap-sm">
+                        <input type="checkbox" id="installNoReboot" checked>
+                        {{ _('install_no_reboot') or 'No reboot (--no-reboot)' }}
+                    </label>
+                </div>
+                <div class="form-group">
+                    <label class="form-label inline-flex items-center gap-sm">
+                        <input type="checkbox" id="installNoTweaks">
+                        {{ _('install_no_tweaks') or 'Skip sysctl tweaks (--no-tweaks)' }}
+                    </label>
+                </div>
+            </div>
+
             <div class="modal-footer">
                 <button type="button" class="btn btn-secondary" onclick="closeModal('addServerModal')">{{ _('cancel')
                     }}</button>
@@ -224,6 +313,16 @@
         document.getElementById('authKey').classList.toggle('hidden', tab !== 'key');
     }
 
+    function onServerTypeChange() {
+        const t = document.getElementById('serverType').value;
+        document.getElementById('nativeInstallBlock').classList.toggle('hidden', t !== 'native');
+    }
+
+    function onRoutingChange() {
+        const mode = document.getElementById('installRouting').value;
+        document.getElementById('customRoutesRow').classList.toggle('hidden', mode !== 'route-custom');
+    }
+
     async function addServer(e) {
         e.preventDefault();
 
@@ -236,6 +335,7 @@
         spinner.classList.remove('hidden');
 
         try {
+            const serverType = document.getElementById('serverType').value;
             const data = {
                 name: document.getElementById('serverName').value,
                 host: document.getElementById('serverHost').value,
@@ -243,10 +343,29 @@
                 username: document.getElementById('serverUser').value,
                 password: document.getElementById('serverPassword').value,
                 private_key: document.getElementById('serverKey').value,
+                server_type: serverType,
             };
 
+            if (serverType === 'native') {
+                data.auto_install = document.getElementById('autoInstall').checked;
+                data.install_port = document.getElementById('installPort').value || '9443';
+                data.install_routing_mode = document.getElementById('installRouting').value;
+                data.install_custom_routes = document.getElementById('installCustomRoutes').value || '';
+                data.install_allow_ipv6 = document.getElementById('installAllowIpv6').checked;
+                data.install_no_reboot = document.getElementById('installNoReboot').checked;
+                data.install_no_tweaks = document.getElementById('installNoTweaks').checked;
+                data.install_preset = document.getElementById('installPreset').value;
+                data.install_conf = document.getElementById('installConf').value || '';
+                data.install_subnet = document.getElementById('installSubnet').value || '';
+                data.install_endpoint = document.getElementById('installEndpoint').value || '';
+            }
+
             const result = await apiCall('/api/servers/add', 'POST', data);
-            showToast(_('server_added'), 'success');
+            if (result && result.install_error) {
+                showToast('Server added, but installer failed: ' + result.install_error, 'error');
+            } else {
+                showToast(_('server_added'), 'success');
+            }
             setTimeout(() => window.location.reload(), 800);
 
         } catch (err) {

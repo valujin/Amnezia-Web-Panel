@@ -23,7 +23,7 @@
         <div class="flex items-center gap-md">
             <div class="server-icon" style="width:56px; height:56px; font-size:1.6rem;">🖥</div>
             <div>
-                <h1 style="font-size:1.4rem; font-weight:700;">{{ server.name }}</h1>
+                <h1 style="font-size:1.4rem; font-weight:700;">{{ server.name }}{% if server.server_type == 'native' %} <span style="font-size:0.65rem; background:#0d8a4f; color:#fff; padding:2px 8px; border-radius:8px; vertical-align:middle; letter-spacing:0.5px;">NATIVE</span>{% endif %}</h1>
                 <div class="font-mono text-muted text-sm">{{ server.host }}:{{ server.ssh_port }} • {{ server.username
                     }}</div>
             </div>
@@ -89,6 +89,7 @@
     </div>
 
     <!-- AWG Card -->
+    {% if server.server_type != 'native' %}
     <div class="card card-hover protocol-card protocol-awg" id="proto-awg">
         <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:var(--space-sm);">
             <div class="protocol-icon">🔮</div>
@@ -207,6 +208,7 @@
             </button>
         </div>
     </div>
+    {% endif %}
 
     <!-- ===== AIVPN teaser (locked, full grid width) ===== -->
     <div class="promo-block promo-aivpn" aria-disabled="true" role="article">
@@ -230,6 +232,7 @@
 </div>
 
 <div class="protocol-cards hidden" id="services-grid">
+    {% if server.server_type != 'native' %}
     <!-- DNS Card -->
     <div class="card card-hover protocol-card protocol-dns" id="proto-dns">
         <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:var(--space-sm);">
@@ -301,6 +304,7 @@
             </button>
         </div>
     </div>
+    {% endif %}
 
     <!-- ===== Reverse Proxy teaser (locked, full grid width) ===== -->
     <div class="promo-block promo-revproxy" aria-disabled="true" role="article">
@@ -482,6 +486,74 @@
                 </div>
                 <div class="form-hint">{{ _('adguard_install_hint') }}</div>
             </div>
+
+            {% if server.server_type == 'native' %}
+            <div id="nativeReinstallOptions"
+                style="display:none; padding: var(--space-md); background: rgba(0,0,0,0.03); border-radius: var(--radius-md); margin-bottom: var(--space-md);">
+                <h3 style="margin: 0 0 var(--space-sm); font-size: 1rem;">{{ _('native_install_options_title') or 'Reinstall / update options' }}</h3>
+                <div class="form-hint" style="margin-bottom: var(--space-md);">
+                    {{ _('native_install_options_hint') or 'These values override the ones saved when the server was added. Leave blank to inherit.' }}
+                </div>
+
+                <div class="form-group">
+                    <label class="form-label">{{ _('install_preset') or 'Preset (--preset)' }}</label>
+                    <select class="form-input" id="reinstallPreset">
+                        <option value="custom-conf">custom-conf</option>
+                        <option value="default">default</option>
+                        <option value="mobile">mobile</option>
+                    </select>
+                </div>
+
+                <div class="form-group">
+                    <label class="form-label">{{ _('install_conf_url') or 'Custom conf URL (only for preset=custom-conf)' }}</label>
+                    <input class="form-input" type="text" id="reinstallConf">
+                </div>
+
+                <div class="form-group">
+                    <label class="form-label">{{ _('install_routing') or 'Routing mode' }}</label>
+                    <select class="form-input" id="reinstallRouting" onchange="onReinstallRoutingChange()">
+                        <option value="route-all">route-all</option>
+                        <option value="route-amnezia">route-amnezia</option>
+                        <option value="route-custom">route-custom</option>
+                    </select>
+                </div>
+
+                <div class="form-group hidden" id="reinstallCustomRoutesRow">
+                    <label class="form-label">{{ _('install_custom_routes') or 'Custom routes (CIDR list, comma-separated)' }}</label>
+                    <input class="form-input" type="text" id="reinstallCustomRoutes" placeholder="10.0.0.0/8, 192.168.1.0/24">
+                </div>
+
+                <div class="form-row">
+                    <div class="form-group">
+                        <label class="form-label">{{ _('install_subnet') or 'VPN subnet (optional)' }}</label>
+                        <input class="form-input" type="text" id="reinstallSubnet" placeholder="10.8.0.0/24">
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label">{{ _('install_endpoint') or 'External endpoint (optional)' }}</label>
+                        <input class="form-input" type="text" id="reinstallEndpoint" placeholder="vpn.example.com">
+                    </div>
+                </div>
+
+                <div class="form-group">
+                    <label class="form-label inline-flex items-center gap-sm">
+                        <input type="checkbox" id="reinstallAllowIpv6">
+                        {{ _('install_allow_ipv6') or 'Allow IPv6 (--allow-ipv6)' }}
+                    </label>
+                </div>
+                <div class="form-group">
+                    <label class="form-label inline-flex items-center gap-sm">
+                        <input type="checkbox" id="reinstallNoReboot">
+                        {{ _('install_no_reboot') or 'No reboot (--no-reboot)' }}
+                    </label>
+                </div>
+                <div class="form-group">
+                    <label class="form-label inline-flex items-center gap-sm">
+                        <input type="checkbox" id="reinstallNoTweaks">
+                        {{ _('install_no_tweaks') or 'Skip sysctl tweaks (--no-tweaks)' }}
+                    </label>
+                </div>
+            </div>
+            {% endif %}
 
             <div class="modal-footer">
                 <button class="btn btn-secondary" onclick="closeModal('installModal')">{{ _('cancel') }}</button>
@@ -689,6 +761,8 @@
 <script>
     const SERVER_ID = {{ server_id }};
     const SERVER_HOST = "{{ server.host }}";
+    const SERVER_TYPE = "{{ server.server_type or 'docker' }}";
+    const SERVER_INSTALL_OPTIONS = {{ (server.install_options or {}) | tojson }};
     let currentInstallProto = 'awg';
     let currentConfig = '';
     let currentVpnLink = '';
@@ -773,7 +847,9 @@
             if (data.connection === 'ok') {
                 html += `<span class="badge badge-success"><span class="badge-dot"></span> ${_('ssh_ok')}</span>`;
             }
-            if (data.docker_installed) {
+            if (SERVER_TYPE === 'native') {
+                html += `<span class="badge badge-success"><span class="badge-dot"></span> Native (bare-metal)</span>`;
+            } else if (data.docker_installed) {
                 html += `<span class="badge badge-success"><span class="badge-dot"></span> ${_('docker_ok')}</span>`;
             } else {
                 html += `<span class="badge badge-warn"><span class="badge-dot"></span> ${_('docker_not_installed')}</span>`;
@@ -828,8 +904,8 @@
     }
 
     function updateStatusCounts(protocols) {
-        const protos = ['awg', 'awg2', 'awg_legacy', 'xray', 'telemt', 'wireguard'];
-        const servs = ['dns', 'adguard', 'socks5'];
+        const protos = SERVER_TYPE === 'native' ? ['awg2'] : ['awg', 'awg2', 'awg_legacy', 'xray', 'telemt', 'wireguard'];
+        const servs = SERVER_TYPE === 'native' ? [] : ['dns', 'adguard', 'socks5'];
 
         let pRunning = 0, pTotal = protos.length;
         let sRunning = 0, sTotal = servs.length;
@@ -1078,10 +1154,12 @@
         const telemtOpts = document.getElementById('telemtOptions');
         const socks5Opts = document.getElementById('socks5Options');
         const adguardOpts = document.getElementById('adguardOptions');
+        const nativeOpts = document.getElementById('nativeReinstallOptions');
 
         telemtOpts.style.display = 'none';
         socks5Opts.style.display = 'none';
         adguardOpts.style.display = 'none';
+        if (nativeOpts) nativeOpts.style.display = 'none';
 
         if (proto === 'dns') {
             portLabel.textContent = _('port') + ' (Internal)';
@@ -1118,10 +1196,45 @@
             portHint.textContent = _('port_default_hint');
         }
 
+        if (SERVER_TYPE === 'native' && proto === 'awg2' && nativeOpts) {
+            const opts = SERVER_INSTALL_OPTIONS || {};
+            portInput.value = opts.port || '9443';
+            portLabel.textContent = _('install_port') || 'Port (--port)';
+            portHint.textContent = '';
+            const preset = document.getElementById('reinstallPreset');
+            const conf = document.getElementById('reinstallConf');
+            const routing = document.getElementById('reinstallRouting');
+            const customRoutes = document.getElementById('reinstallCustomRoutes');
+            const subnet = document.getElementById('reinstallSubnet');
+            const endpoint = document.getElementById('reinstallEndpoint');
+            const allowIpv6 = document.getElementById('reinstallAllowIpv6');
+            const noReboot = document.getElementById('reinstallNoReboot');
+            const noTweaks = document.getElementById('reinstallNoTweaks');
+            if (preset) preset.value = opts.preset || 'custom-conf';
+            if (conf) conf.value = opts.conf || 'https://raw.githubusercontent.com/valujin/amneziawg-installer/main/conf/amneziawg-2.0-1779689104577.conf';
+            if (routing) routing.value = opts.routing_mode || 'route-all';
+            if (customRoutes) customRoutes.value = opts.custom_routes || '';
+            if (subnet) subnet.value = opts.subnet || '';
+            if (endpoint) endpoint.value = opts.endpoint || '';
+            if (allowIpv6) allowIpv6.checked = opts.allow_ipv6 !== false;
+            if (noReboot) noReboot.checked = opts.no_reboot !== false;
+            if (noTweaks) noTweaks.checked = opts.no_tweaks === true;
+            onReinstallRoutingChange();
+            nativeOpts.style.display = 'block';
+        }
+
         document.getElementById('installForm').classList.remove('hidden');
         document.getElementById('installProgress').classList.add('hidden');
         document.getElementById('installDone').style.display = 'none';
         openModal('installModal');
+    }
+
+    function onReinstallRoutingChange() {
+        const sel = document.getElementById('reinstallRouting');
+        const row = document.getElementById('reinstallCustomRoutesRow');
+        if (!sel || !row) return;
+        if (sel.value === 'route-custom') row.classList.remove('hidden');
+        else row.classList.add('hidden');
     }
 
     async function installProtocol() {
@@ -1174,6 +1287,26 @@
                 params.adguard_doh_port = parseInt(document.getElementById('installAdguardDohPort').value) || 443;
                 params.adguard_expose_dot = document.getElementById('installAdguardExposeDot').checked;
                 params.adguard_expose_doh = document.getElementById('installAdguardExposeDoh').checked;
+            }
+            if (SERVER_TYPE === 'native' && currentInstallProto === 'awg2') {
+                const preset = document.getElementById('reinstallPreset');
+                const conf = document.getElementById('reinstallConf');
+                const routing = document.getElementById('reinstallRouting');
+                const customRoutes = document.getElementById('reinstallCustomRoutes');
+                const subnet = document.getElementById('reinstallSubnet');
+                const endpoint = document.getElementById('reinstallEndpoint');
+                const allowIpv6 = document.getElementById('reinstallAllowIpv6');
+                const noReboot = document.getElementById('reinstallNoReboot');
+                const noTweaks = document.getElementById('reinstallNoTweaks');
+                if (preset) params.native_preset = preset.value;
+                if (conf) params.native_conf = conf.value;
+                if (routing) params.native_routing_mode = routing.value;
+                if (customRoutes) params.native_custom_routes = customRoutes.value;
+                if (subnet) params.native_subnet = subnet.value;
+                if (endpoint) params.native_endpoint = endpoint.value;
+                if (allowIpv6) params.native_allow_ipv6 = allowIpv6.checked;
+                if (noReboot) params.native_no_reboot = noReboot.checked;
+                if (noTweaks) params.native_no_tweaks = noTweaks.checked;
             }
             const result = await apiCall(`/api/servers/${SERVER_ID}/install`, 'POST', params);
             clearInterval(progressInterval);

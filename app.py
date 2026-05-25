@@ -157,16 +157,37 @@ async def save_data_async(data):
 
 
 def get_ssh(server):
-    return SSHManager(
+    ssh = SSHManager(
         host=server['host'],
         port=server.get('ssh_port', 22),
         username=server['username'],
         password=server.get('password'),
         private_key=server.get('private_key'),
     )
+    # Stash the server dict on the SSH wrapper so get_protocol_manager() can
+    # pick the right driver (docker vs. native bare-metal) without every call
+    # site having to thread `server` through. Anything constructed via this
+    # helper is auto-routed.
+    ssh._panel_server = server
+    return ssh
 
 
-def get_protocol_manager(ssh, protocol: str):
+def get_protocol_manager(ssh, protocol: str, server: Optional[dict] = None):
+    """Pick the right manager class for `protocol`.
+
+    When the target server has ``server_type == 'native'`` (bare-metal
+    install via valujin/amneziawg-installer), every protocol routes through
+    BareMetalAWGManager. The server dict is sourced either from the explicit
+    `server` argument or from the SSH wrapper's ``_panel_server`` attribute
+    (set by ``get_ssh()``).
+    """
+    if server is None:
+        server = getattr(ssh, '_panel_server', None)
+    server_type = (server or {}).get('server_type', 'docker')
+    if server_type == 'native':
+        from managers.bare_metal_awg_manager import BareMetalAWGManager
+        return BareMetalAWGManager(ssh)
+
     if protocol == 'xray':
         from managers.xray_manager import XrayManager
         return XrayManager(ssh)
@@ -611,6 +632,24 @@ class AddServerRequest(BaseModel):
     password: str = ''
     private_key: str = ''
     name: str = ''
+    # 'docker' (legacy, default) or 'native' (bare-metal install via
+    # valujin/amneziawg-installer scripts). Persisted on the server record
+    # and consulted by get_protocol_manager() to pick the right driver.
+    server_type: str = 'docker'
+    # When server_type=='native' and auto_install is true, the installer
+    # runs immediately after the SSH probe succeeds. Options follow the
+    # CLI surface of install_amneziawg.sh.
+    auto_install: bool = False
+    install_port: str = '9443'
+    install_routing_mode: str = 'route-all'   # route-all | route-amnezia | route-custom
+    install_custom_routes: str = ''
+    install_allow_ipv6: bool = True
+    install_no_reboot: bool = True
+    install_no_tweaks: bool = False
+    install_preset: str = 'custom-conf'       # default | mobile | custom-conf
+    install_conf: str = 'https://raw.githubusercontent.com/valujin/amneziawg-installer/main/conf/amneziawg-2.0-1779689104577.conf'
+    install_subnet: str = ''
+    install_endpoint: str = ''
 
 
 class EditServerRequest(BaseModel):
@@ -648,6 +687,17 @@ class InstallProtocolRequest(BaseModel):
     adguard_expose_dns: Optional[bool] = None
     adguard_expose_dot: Optional[bool] = None
     adguard_expose_doh: Optional[bool] = None
+    # Native AmneziaWG 2.0 (bare-metal) install options. Only honored when
+    # the target server has server_type == 'native' and protocol == 'awg2'.
+    native_routing_mode: Optional[str] = None       # route-all | route-amnezia | route-custom
+    native_custom_routes: Optional[str] = None
+    native_allow_ipv6: Optional[bool] = None
+    native_no_reboot: Optional[bool] = None
+    native_no_tweaks: Optional[bool] = None
+    native_preset: Optional[str] = None             # default | mobile | custom-conf
+    native_conf: Optional[str] = None
+    native_subnet: Optional[str] = None
+    native_endpoint: Optional[str] = None
 
 
 class Socks5SettingsRequest(BaseModel):
@@ -1204,11 +1254,68 @@ async def api_add_server(request: Request, req: AddServerRequest):
             'username': username, 'password': req.password,
             'private_key': req.private_key, 'server_info': server_info,
             'protocols': {},
+            'server_type': req.server_type if req.server_type in ('docker', 'native') else 'docker',
         }
+        # Remember the install options chosen at add-time on native servers
+        # so we can show / reuse them later (e.g. for re-install).
+        if server['server_type'] == 'native':
+            server['install_options'] = {
+                'port': req.install_port,
+                'routing_mode': req.install_routing_mode,
+                'custom_routes': req.install_custom_routes,
+                'allow_ipv6': req.install_allow_ipv6,
+                'no_reboot': req.install_no_reboot,
+                'no_tweaks': req.install_no_tweaks,
+                'preset': req.install_preset,
+                'conf': req.install_conf,
+                'subnet': req.install_subnet,
+                'endpoint': req.install_endpoint,
+            }
+
         data = load_data()
         data['servers'].append(server)
         save_data(data)
-        return {'status': 'success', 'server_id': len(data['servers']) - 1, 'server_info': server_info}
+        server_id = len(data['servers']) - 1
+
+        # Optionally run the bare-metal installer immediately. We do this
+        # synchronously because the panel's add-server flow already shows a
+        # spinner — the installer with --no-reboot --yes typically finishes
+        # in a single SSH session.
+        install_result = None
+        install_error = None
+        if server['server_type'] == 'native' and req.auto_install:
+            try:
+                from managers.bare_metal_awg_manager import BareMetalAWGManager
+                ssh = get_ssh(server)
+                ssh.connect()
+                manager = BareMetalAWGManager(ssh)
+                install_result = manager.install_protocol(
+                    'awg2',
+                    port=req.install_port,
+                    install_options=server['install_options'],
+                )
+                ssh.disconnect()
+                server['protocols']['awg2'] = {
+                    'installed': True,
+                    'port': req.install_port,
+                    'awg_params': install_result.get('awg_params', {}),
+                }
+                save_data(data)
+            except Exception as e:
+                logger.exception("Native auto-install failed")
+                install_error = str(e)
+
+        response = {
+            'status': 'success',
+            'server_id': server_id,
+            'server_info': server_info,
+            'server_type': server['server_type'],
+        }
+        if install_result is not None:
+            response['install_result'] = install_result
+        if install_error is not None:
+            response['install_error'] = install_error
+        return response
     except Exception as e:
         logger.exception("Error adding server")
         return JSONResponse({'error': str(e)}, status_code=500)
@@ -1485,8 +1592,41 @@ async def api_check_server(request: Request, server_id: int):
         server = data['servers'][server_id]
         ssh = get_ssh(server)
         ssh.connect()
+        server_type = server.get('server_type', 'docker')
+        # Bare-metal servers only host awg2 — short-circuit the multi-protocol
+        # probe to avoid pointless SSH round-trips and Docker-specific checks.
+        if server_type == 'native':
+            from managers.bare_metal_awg_manager import BareMetalAWGManager
+            bm = BareMetalAWGManager(ssh)
+            status = {
+                'connection': 'ok',
+                'docker_installed': False,
+                'server_type': 'native',
+                'protocols': {},
+            }
+            try:
+                result = bm.get_server_status('awg2')
+                status['protocols']['awg2'] = result
+                if 'protocols' not in server:
+                    server['protocols'] = {}
+                if result.get('container_exists'):
+                    server['protocols']['awg2'] = {
+                        'installed': True,
+                        'port': result.get('port', '9443'),
+                        'awg_params': result.get('awg_params', {}),
+                    }
+                    save_data(data)
+                else:
+                    if 'awg2' in server.get('protocols', {}):
+                        del server['protocols']['awg2']
+                        save_data(data)
+            except Exception as e:
+                status['protocols']['awg2'] = {'error': str(e)}
+            ssh.disconnect()
+            return status
+
         # Just use awg's docker checker since it uses the same command
-        manager = get_protocol_manager(ssh, 'awg')
+        manager = get_protocol_manager(ssh, 'awg', server)
         status = {'connection': 'ok', 'docker_installed': manager.check_docker_installed(), 'protocols': {}}
         
         changed = False
@@ -1497,7 +1637,7 @@ async def api_check_server(request: Request, server_id: int):
 
         def check_proto(proto):
             try:
-                p_manager = get_protocol_manager(ssh, proto)
+                p_manager = get_protocol_manager(ssh, proto, server)
                 result = _manager_call(p_manager, 'get_server_status', proto)
                 db_proto = server.get('protocols', {}).get(proto, {})
                 if not result.get('port') and db_proto.get('port'):
@@ -1552,6 +1692,48 @@ async def api_install_protocol(request: Request, server_id: int, req: InstallPro
         ssh = get_ssh(server)
         ssh.connect()
         manager = get_protocol_manager(ssh, req.protocol)
+
+        # Native (bare-metal) AmneziaWG 2.0 installs are driven by the
+        # installer script with a different option surface. Honor the
+        # native_* fields from the request, falling back to whatever was
+        # captured when the server was added.
+        if server.get('server_type') == 'native':
+            if req.protocol != 'awg2':
+                ssh.disconnect()
+                return JSONResponse(
+                    {'error': 'Native servers support only awg2'},
+                    status_code=400,
+                )
+            stored = server.get('install_options', {}) or {}
+            override = {
+                'routing_mode': req.native_routing_mode,
+                'custom_routes': req.native_custom_routes,
+                'allow_ipv6': req.native_allow_ipv6,
+                'no_reboot': req.native_no_reboot,
+                'no_tweaks': req.native_no_tweaks,
+                'preset': req.native_preset,
+                'conf': req.native_conf,
+                'subnet': req.native_subnet,
+                'endpoint': req.native_endpoint,
+            }
+            install_options = {k: v for k, v in stored.items()}
+            for k, v in override.items():
+                if v is not None:
+                    install_options[k] = v
+            install_options['port'] = req.port or install_options.get('port') or '9443'
+            result = manager.install_protocol(
+                'awg2', port=req.port, install_options=install_options
+            )
+            server['install_options'] = install_options
+            proto_record = {
+                'installed': True,
+                'port': req.port,
+                'awg_params': result.get('awg_params', {}),
+            }
+            server['protocols']['awg2'] = proto_record
+            save_data(data)
+            ssh.disconnect()
+            return result
 
         # Pass parameters to installer
         if req.protocol == 'telemt':

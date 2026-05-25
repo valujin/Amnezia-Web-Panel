@@ -2,8 +2,13 @@ version: '3.8'
 
 services:
   amnezia_panel:
-    image: prvtpro/amnezia-panel:1.4.3
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: valujin/amnezia-panel:local
     container_name: amnezia_panel
+
+    pull_policy: build
 
     ports:
       - "${APP_PORT:-5000}:5000"

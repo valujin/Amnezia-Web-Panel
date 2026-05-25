@@ -345,5 +345,26 @@
     "checking_updates": "Checking...",
     "update_available": "New version available",
     "download_update": "Download update",
-    "up_to_date": "You have the latest version"
+    "up_to_date": "You have the latest version",
+
+    "server_type": "Server type",
+    "server_type_docker": "Docker (default Amnezia stack)",
+    "server_type_native": "Native AmneziaWG 2.0 (bare-metal installer)",
+    "server_type_hint": "Native uses valujin/amneziawg-installer — no Docker needed.",
+    "install_options_title": "Install options (AmneziaWG 2.0)",
+    "install_options_hint": "Passed straight to install_amneziawg.sh. Defaults match the recommended profile.",
+    "auto_install_label": "Run installer right after connecting",
+    "install_port": "Port (--port)",
+    "install_preset": "Preset (--preset)",
+    "install_conf_url": "Custom conf URL (only for preset=custom-conf)",
+    "install_routing": "Routing mode",
+    "install_custom_routes": "Custom routes (CIDR list, comma-separated)",
+    "install_subnet": "VPN subnet (optional)",
+    "install_endpoint": "External endpoint (optional)",
+    "install_allow_ipv6": "Allow IPv6 (--allow-ipv6)",
+    "install_no_reboot": "No reboot (--no-reboot)",
+    "install_no_tweaks": "Skip sysctl tweaks (--no-tweaks)",
+    "native_install_banner": "Native AmneziaWG 2.0 server — managed via bare-metal installer",
+    "native_install_options_title": "Reinstall / update options",
+    "native_install_options_hint": "These values override the ones saved when the server was added. Leave blank to inherit."
 }

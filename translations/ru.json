@@ -345,5 +345,26 @@
     "checking_updates": "Проверка...",
     "update_available": "Доступна новая версия",
     "download_update": "Скачать обновление",
-    "up_to_date": "У вас установлена последняя версия"
+    "up_to_date": "У вас установлена последняя версия",
+
+    "server_type": "Тип сервера",
+    "server_type_docker": "Docker (стандартный стек Amnezia)",
+    "server_type_native": "Native AmneziaWG 2.0 (bare-metal установщик)",
+    "server_type_hint": "Native использует valujin/amneziawg-installer — Docker не требуется.",
+    "install_options_title": "Параметры установки (AmneziaWG 2.0)",
+    "install_options_hint": "Передаются напрямую в install_amneziawg.sh. По умолчанию используется рекомендуемый профиль.",
+    "auto_install_label": "Запустить установщик сразу после подключения",
+    "install_port": "Порт (--port)",
+    "install_preset": "Preset (--preset)",
+    "install_conf_url": "URL пользовательского конфига (только для preset=custom-conf)",
+    "install_routing": "Режим маршрутизации",
+    "install_custom_routes": "Свои маршруты (список CIDR через запятую)",
+    "install_subnet": "Подсеть VPN (необязательно)",
+    "install_endpoint": "Внешний endpoint (необязательно)",
+    "install_allow_ipv6": "Разрешить IPv6 (--allow-ipv6)",
+    "install_no_reboot": "Без перезагрузки (--no-reboot)",
+    "install_no_tweaks": "Без правок sysctl (--no-tweaks)",
+    "native_install_banner": "Native сервер AmneziaWG 2.0 — управляется через bare-metal установщик",
+    "native_install_options_title": "Параметры переустановки / обновления",
+    "native_install_options_hint": "Эти значения переопределят сохранённые при добавлении сервера. Оставьте пустым, чтобы наследовать."
 }
