@@ -221,18 +221,53 @@ class BareMetalAWGManager:
     # ===================== CLIENTS =====================
 
     def get_clients(self, protocol_type):
-        """Return list of clients in AWGManager-compatible shape."""
+        """Return list of clients in AWGManager-compatible shape.
+
+        The panel UI (server.html `loadConnections`) reads display fields
+        from `client.userData`, not from the top-level dict. We mirror the
+        Docker AWGManager output so the existing renderer Just Works:
+
+            {clientId, enabled, userData: {clientName, clientIp,
+             latestHandshake, dataReceived, dataSent,
+             dataReceivedBytes, dataSentBytes, allowedIps}}
+
+        Live traffic comes from `awg show awg0` (AmneziaWG user-space tool,
+        same line format as `wg show`).
+        """
         if protocol_type != self.AWG2:
             return []
         peers = self._parse_peers()
+        try:
+            live = self._awg_show()
+        except Exception as e:  # noqa: BLE001 — telemetry only
+            logger.warning('awg show failed: %s', e)
+            live = {}
+
         results = []
         for p in peers:
+            pub = p.get('public_key', '')
+            show = live.get(pub, {})
+            allowed = p.get('allowed_ips', '') or show.get('allowedIps', '')
+            client_ip = (allowed.split(',')[0].strip().split('/')[0]
+                         if allowed else '')
+            name = p.get('name') or (
+                f'External ({client_ip})' if client_ip else 'External (native)'
+            )
             results.append({
-                'clientId': p['public_key'],
-                'clientName': p.get('name', ''),
-                'clientIp': p.get('allowed_ips', '').split('/')[0],
+                'clientId': pub,
                 'enabled': True,
-                'creationDate': '',
+                'userData': {
+                    'clientName': name,
+                    'clientIp': client_ip,
+                    'allowedIps': allowed,
+                    'latestHandshake': show.get('latestHandshake', ''),
+                    'dataReceived': show.get('dataReceived', ''),
+                    'dataSent': show.get('dataSent', ''),
+                    'dataReceivedBytes': show.get('dataReceivedBytes', 0),
+                    'dataSentBytes': show.get('dataSentBytes', 0),
+                    'enabled': True,
+                    'externalClient': not bool(p.get('name')),
+                },
             })
         return results
 
@@ -315,9 +350,74 @@ class BareMetalAWGManager:
 
     # ===================== INTERNALS =====================
 
+    # ===================== INTERNALS =====================
+
+    def _awg_show(self):
+        """Run `awg show awg0` on the remote and return per-peer live data.
+
+        Output format (one block per peer, identical to `wg show`):
+            peer: <PublicKey>
+              endpoint: ...
+              allowed ips: 10.8.0.2/32
+              latest handshake: 12 seconds ago
+              transfer: 1.23 MiB received, 456 KiB sent
+              persistent keepalive: every 25 seconds
+        """
+        out, _, code = self.ssh.run_sudo_command(
+            "awg show awg0 2>/dev/null || true"
+        )
+        if code != 0 or not (out or '').strip():
+            return {}
+        result = {}
+        current = None
+        for raw in out.split('\n'):
+            line = raw.strip()
+            if line.startswith('peer:'):
+                current = line.split(':', 1)[1].strip()
+                result[current] = {}
+                continue
+            if not current or ':' not in line:
+                continue
+            key, _, value = line.partition(':')
+            key = key.strip().lower()
+            value = value.strip()
+            if key == 'latest handshake':
+                result[current]['latestHandshake'] = value
+            elif key == 'allowed ips':
+                result[current]['allowedIps'] = value
+            elif key == 'endpoint':
+                result[current]['endpoint'] = value
+            elif key == 'transfer':
+                # "1.23 MiB received, 456 KiB sent"
+                parts = value.split(',')
+                if len(parts) == 2:
+                    received = parts[0].strip().replace(' received', '')
+                    sent = parts[1].strip().replace(' sent', '')
+                    result[current]['dataReceived'] = received
+                    result[current]['dataSent'] = sent
+                    result[current]['dataReceivedBytes'] = self._parse_bytes(received)
+                    result[current]['dataSentBytes'] = self._parse_bytes(sent)
+        return result
+
+    def _parse_bytes(self, size_str):
+        """Parse human-readable size like '1.50 MiB' / '512 B' into bytes."""
+        try:
+            parts = (size_str or '').strip().split()
+            if len(parts) != 2:
+                return 0
+            val = float(parts[0])
+            units = {
+                'B': 1,
+                'KiB': 1024,
+                'MiB': 1024 ** 2,
+                'GiB': 1024 ** 3,
+                'TiB': 1024 ** 4,
+            }
+            return int(val * units.get(parts[1], 1))
+        except Exception:
+            return 0
+
     def _safe_client_name(self, name):
-        """Match validate_client_name() in manage_amneziawg.sh: alnum + _.-,
-        up to 32 chars. Strip everything else."""
         cleaned = re.sub(r'[^A-Za-z0-9_.\-]', '_', (name or '').strip())
         cleaned = cleaned.strip('._-') or 'client'
         return cleaned[:32]
