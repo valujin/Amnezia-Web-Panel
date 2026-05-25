@@ -18,6 +18,7 @@ Server-side layout assumed (mirrors the installer's defaults):
 """
 
 import logging
+import os
 import re
 import shlex
 
@@ -253,12 +254,22 @@ class BareMetalAWGManager:
             name = p.get('name') or (
                 f'External ({client_ip})' if client_ip else 'External (native)'
             )
+            # The installer stores per-client private keys in
+            # `<AWG_DIR>/<name>.conf`. We don't ship the key in the listing
+            # (UI only needs a truthy presence marker — the key is fetched on
+            # demand via get_client_config), but flagging it lets the UI show
+            # the "view config" button instead of the "Configuration
+            # unavailable" warning, which is reserved for peers created via
+            # the native Amnezia mobile app (those have no #_Name marker).
+            has_internal_key = bool(p.get('name'))
             results.append({
                 'clientId': pub,
                 'enabled': True,
                 'userData': {
                     'clientName': name,
                     'clientIp': client_ip,
+                    'clientPrivateKey': 'stored' if has_internal_key else '',
+                    'clientPubKey': pub,
                     'allowedIps': allowed,
                     'latestHandshake': show.get('latestHandshake', ''),
                     'dataReceived': show.get('dataReceived', ''),
@@ -266,7 +277,7 @@ class BareMetalAWGManager:
                     'dataReceivedBytes': show.get('dataReceivedBytes', 0),
                     'dataSentBytes': show.get('dataSentBytes', 0),
                     'enabled': True,
-                    'externalClient': not bool(p.get('name')),
+                    'externalClient': not has_internal_key,
                 },
             })
         return results
@@ -338,6 +349,93 @@ class BareMetalAWGManager:
         if code != 0 or not out:
             raise RuntimeError(f"Client config not found: {conf_remote}")
         return out
+
+    # ===================== BACKUPS =====================
+
+    def create_backup_snapshot(self, local_dir, keep=10):
+        """Create a server-side backup tarball and pull a copy locally.
+
+        Steps (all idempotent and best-effort — never raises into the caller):
+        1. Run `manage_amneziawg.sh backup`, which writes a timestamped
+           tar.gz into `/etc/amnezia/amneziawg/backups/` covering the server
+           config, peer configs, key material and the JSON metadata file.
+        2. SFTP-download the newest tarball into `local_dir`.
+        3. Prune the local mirror to `keep` files (newest first).
+
+        Returns the absolute local path of the saved snapshot on success,
+        or None when no snapshot could be produced. The remote manage
+        script handles its own retention; we keep our local mirror small
+        to bound panel disk usage.
+        """
+        try:
+            os.makedirs(local_dir, exist_ok=True)
+        except Exception as e:  # noqa: BLE001
+            logger.warning('Backup: cannot create %s: %s', local_dir, e)
+            return None
+
+        # 1. Trigger remote backup.
+        out, err, code = self.ssh.run_sudo_command(
+            f"AWG_YES=1 bash {shlex.quote(self.MANAGE_PATH)} backup",
+            timeout=120,
+        )
+        if code != 0:
+            logger.warning(
+                'Backup: remote manage backup failed (%s): %s',
+                code, (err or out or '')[-400:],
+            )
+            return None
+
+        # 2. Locate newest tarball. We use `ls -t` over `find -printf` so
+        # this works on BusyBox-flavoured shells too.
+        list_out, _, lcode = self.ssh.run_sudo_command(
+            f"ls -1t {shlex.quote(self.AWG_DIR)}/backups/awg_backup_*.tar.gz 2>/dev/null | head -n1"
+        )
+        remote_path = (list_out or '').strip().splitlines()[0] if list_out else ''
+        if lcode != 0 or not remote_path:
+            logger.warning('Backup: cannot locate latest backup tarball')
+            return None
+
+        basename = os.path.basename(remote_path)
+        local_path = os.path.join(local_dir, basename)
+
+        # 3. Pull the tarball. Backups live under 0700/root, so stage to
+        # /tmp via sudo first, then SFTP the world-readable copy.
+        staged = f"/tmp/{basename}"
+        _, _, scode = self.ssh.run_sudo_command(
+            f"cp {shlex.quote(remote_path)} {shlex.quote(staged)} && "
+            f"chmod 644 {shlex.quote(staged)}"
+        )
+        if scode != 0:
+            logger.warning('Backup: cannot stage tarball at %s', staged)
+            return None
+        try:
+            self.ssh.download_binary(staged, local_path)
+        except Exception as e:  # noqa: BLE001
+            logger.warning('Backup: SFTP download failed: %s', e)
+            local_path = None
+        finally:
+            self.ssh.run_sudo_command(f"rm -f {shlex.quote(staged)}")
+
+        if not local_path:
+            return None
+
+        # 4. Local retention — keep newest `keep`.
+        try:
+            entries = sorted(
+                (e for e in os.listdir(local_dir)
+                 if e.startswith('awg_backup_') and e.endswith('.tar.gz')),
+                reverse=True,
+            )
+            for stale in entries[keep:]:
+                try:
+                    os.remove(os.path.join(local_dir, stale))
+                except OSError:
+                    pass
+        except Exception:  # noqa: BLE001
+            pass
+
+        logger.info('Backup snapshot saved: %s', local_path)
+        return local_path
 
     def toggle_client(self, protocol_type, client_id, enable):
         # The bare-metal manage script does not expose enable/disable —

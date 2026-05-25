@@ -82,7 +82,50 @@ if getattr(sys, 'frozen', False):
 else:
     application_path = os.path.dirname(__file__)
 
-DATA_FILE = os.path.join(application_path, 'data.json')
+# ---- Persistent data location -------------------------------------------------
+# Historically the panel kept `data.json` next to the source files (`/app`
+# inside the Docker image). That directory is wiped on `docker compose
+# up -d --build`, so every rebuild reset all servers/users. We now default to
+# `/app/data/data.json`, which is the mounted named volume (`amnezia_data`),
+# while still respecting an explicit `PANEL_DATA_FILE` / `PANEL_DATA_DIR`
+# override.
+#
+# On startup we run a one-shot migration: if the new file does not exist but
+# the legacy in-image file does, copy it across. This protects users upgrading
+# from <= v1.4.3 who already had data inside the image.
+_legacy_data_file = os.path.join(application_path, 'data.json')
+_data_dir = os.environ.get('PANEL_DATA_DIR') or (
+    '/app/data' if os.path.isdir('/app/data') or os.access('/app', os.W_OK)
+    else application_path
+)
+try:
+    os.makedirs(_data_dir, exist_ok=True)
+except Exception:
+    # Read-only mount or similar — fall back to the legacy location.
+    _data_dir = application_path
+
+DATA_FILE = os.environ.get('PANEL_DATA_FILE') or os.path.join(_data_dir, 'data.json')
+BACKUPS_DIR = os.path.join(_data_dir, 'backups')
+try:
+    os.makedirs(BACKUPS_DIR, exist_ok=True)
+except Exception:
+    BACKUPS_DIR = os.path.join(application_path, 'backups')
+    os.makedirs(BACKUPS_DIR, exist_ok=True)
+
+# One-shot migration from the legacy in-image path. Only runs when the new
+# location is empty so we never overwrite live data.
+if (
+    DATA_FILE != _legacy_data_file
+    and not os.path.exists(DATA_FILE)
+    and os.path.exists(_legacy_data_file)
+):
+    try:
+        import shutil as _shutil
+        _shutil.copy2(_legacy_data_file, DATA_FILE)
+        logger.info(f"Migrated legacy data.json -> {DATA_FILE}")
+    except Exception as _mig_e:
+        logger.error(f"Failed to migrate legacy data.json: {_mig_e}")
+
 CURRENT_VERSION = "v1.4.3"
 
 
@@ -216,6 +259,36 @@ def _manager_call(manager, method, protocol, *args, **kwargs):
     if isinstance(manager, WireGuardManager):
         return fn(*args, **kwargs)
     return fn(protocol, *args, **kwargs)
+
+
+def _server_backup_dir(server_id: int) -> str:
+    """Filesystem path that holds tarball snapshots for one server.
+
+    Located under the panel's persistent data volume so it survives
+    `docker compose up -d --build`.
+    """
+    d = os.path.join(BACKUPS_DIR, f"server-{server_id}")
+    os.makedirs(d, exist_ok=True)
+    return d
+
+
+def _maybe_backup_native_server(server: dict, server_id: int, manager) -> None:
+    """Take a backup snapshot after a state-changing operation.
+
+    Currently only fires for `server_type == 'native'` AWG installs where
+    `BareMetalAWGManager.create_backup_snapshot()` is available. Failures
+    are logged but never propagate — losing a backup must not break the
+    user-facing add/remove operation.
+    """
+    if (server or {}).get('server_type') != 'native':
+        return
+    fn = getattr(manager, 'create_backup_snapshot', None)
+    if not callable(fn):
+        return
+    try:
+        fn(_server_backup_dir(server_id))
+    except Exception as e:  # noqa: BLE001 — best-effort
+        logger.warning("Auto-backup failed for server %s: %s", server_id, e)
 
 
 def generate_vpn_link(config_text):
@@ -2058,6 +2131,12 @@ async def api_add_connection(request: Request, server_id: int, req: AddConnectio
             result = manager.add_client(req.name, server['host'])
         else:
             result = manager.add_client(req.protocol, req.name, server['host'], port)
+
+        # Snapshot the server config after the mutation so we always have a
+        # fresh tarball if the host is later lost. Native-AWG only; no-op
+        # otherwise. See _maybe_backup_native_server() for the contract.
+        _maybe_backup_native_server(server, server_id, manager)
+
         ssh.disconnect()
 
         if result.get('config'):
@@ -2098,6 +2177,7 @@ async def api_remove_connection(request: Request, server_id: int, req: Connectio
         ssh.connect()
         manager = get_protocol_manager(ssh, req.protocol)
         _manager_call(manager, 'remove_client', req.protocol, req.client_id)
+        _maybe_backup_native_server(server, server_id, manager)
         ssh.disconnect()
         # Remove from user_connections
         data['user_connections'] = [
@@ -2109,6 +2189,83 @@ async def api_remove_connection(request: Request, server_id: int, req: Connectio
     except Exception as e:
         logger.exception("Error removing connection")
         return JSONResponse({'error': str(e)}, status_code=500)
+
+
+# ----- Native AWG backup snapshots --------------------------------------------
+# Snapshots are created automatically after every add/remove on native
+# servers (see _maybe_backup_native_server). These endpoints let an admin
+# browse, download or trigger one manually — primarily so the tarball can
+# be re-uploaded onto a fresh host via `manage_amneziawg.sh restore`.
+
+@app.get('/api/servers/{server_id}/backups', tags=["Backups"])
+async def api_list_backups(request: Request, server_id: int):
+    if not _check_admin(request):
+        return JSONResponse({'error': 'Forbidden'}, status_code=403)
+    d = _server_backup_dir(server_id)
+    items = []
+    for name in sorted(os.listdir(d), reverse=True):
+        if not (name.startswith('awg_backup_') and name.endswith('.tar.gz')):
+            continue
+        full = os.path.join(d, name)
+        try:
+            st = os.stat(full)
+            items.append({
+                'name': name,
+                'size': st.st_size,
+                'mtime': int(st.st_mtime),
+            })
+        except OSError:
+            continue
+    return {'backups': items}
+
+
+@app.post('/api/servers/{server_id}/backups/create', tags=["Backups"])
+async def api_create_backup(request: Request, server_id: int):
+    if not _check_admin(request):
+        return JSONResponse({'error': 'Forbidden'}, status_code=403)
+    data = load_data()
+    if server_id >= len(data['servers']):
+        return JSONResponse({'error': 'Server not found'}, status_code=404)
+    server = data['servers'][server_id]
+    if server.get('server_type') != 'native':
+        return JSONResponse(
+            {'error': 'Backups are only available for native AmneziaWG servers'},
+            status_code=400,
+        )
+    ssh = get_ssh(server)
+    try:
+        ssh.connect()
+        manager = get_protocol_manager(ssh, 'awg2')
+        path = await asyncio.to_thread(
+            manager.create_backup_snapshot, _server_backup_dir(server_id)
+        )
+    except Exception as e:
+        logger.exception("Manual backup failed")
+        return JSONResponse({'error': str(e)}, status_code=500)
+    finally:
+        try:
+            ssh.disconnect()
+        except Exception:
+            pass
+    if not path:
+        return JSONResponse({'error': 'Backup did not produce a tarball'}, status_code=500)
+    return {'status': 'success', 'file': os.path.basename(path)}
+
+
+@app.get('/api/servers/{server_id}/backups/{filename}', tags=["Backups"])
+async def api_download_backup(request: Request, server_id: int, filename: str):
+    if not _check_admin(request):
+        return JSONResponse({'error': 'Forbidden'}, status_code=403)
+    # Defence in depth — never let a crafted filename escape the dir.
+    safe = os.path.basename(filename)
+    if safe != filename or not (
+        safe.startswith('awg_backup_') and safe.endswith('.tar.gz')
+    ):
+        return JSONResponse({'error': 'Invalid filename'}, status_code=400)
+    full = os.path.join(_server_backup_dir(server_id), safe)
+    if not os.path.isfile(full):
+        return JSONResponse({'error': 'Not found'}, status_code=404)
+    return FileResponse(full, media_type='application/gzip', filename=safe)
 
 
 @app.post('/api/servers/{server_id}/connections/edit', tags=["Connections"])

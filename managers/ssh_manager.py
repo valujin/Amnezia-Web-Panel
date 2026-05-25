@@ -196,6 +196,21 @@ class SSHManager:
         finally:
             sftp.close()
 
+    def download_binary(self, remote_path, local_path):
+        """SFTP-download a binary file from the remote host to `local_path`.
+
+        Unlike `download_file()` this does not decode the payload as UTF-8,
+        making it safe for tarballs, archives, and other opaque blobs.
+        """
+        if not self.client:
+            raise ConnectionError("Not connected to server")
+        sftp = self.client.open_sftp()
+        try:
+            sftp.get(remote_path, local_path)
+        finally:
+            sftp.close()
+        return local_path
+
     def file_exists(self, remote_path):
         """Check if a remote file exists."""
         if not self.client:
